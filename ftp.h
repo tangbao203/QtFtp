@@ -4,6 +4,10 @@
 #include "ftp_global.h"
 #include <QObject>
 #include <QAbstractSocket>
+#include <QString>
+#ifndef CHAR_CR
+#define CHAR_CR QString("\r\n")
+#endif
 
 class QTcpSocket;
 class QTcpServer;
@@ -15,6 +19,7 @@ public:
     enum Mode {PASV,PORT};
     enum Type {BINARY='I',ASCII='A',EBCDIC='E',LOCAL='L'};
     enum CMD{CMD_PUT,CMD_GET,CMD_LIST,CMD_OTHER};
+
 public:
     explicit Ftp();
     ~Ftp();
@@ -25,13 +30,15 @@ public:
     void type(Type transfer_type){m_type=transfer_type;}
     void put(QString local_filename, QString remote_filename, qint64 offset=0, bool is_append=false);
     void get(QString local_filename,QString remote_filename,qint64 offset=0);
-    quint64 fileSize(QString remote_filename);
+    qint64 fileSize(QString remote_filename);
     void list(QString remote_dir);
     void rawCommand(QString cmd);
+    bool connectStatus(){return b_isConnected;}
+    bool loginStatus(){return b_isLogined;}
 
 private:
     void setTransferProperty();
-    void buildDataChannel();
+    void addDataChannel();
 
 private:
     QString str_ip;
@@ -52,10 +59,9 @@ private:
     QTcpServer *p_listener;
 
     QFile *p_file;
-    quint64 n_transferValue;
-    quint64 n_transferTotal;
-
-    quint64 n_remoteFileSize;
+    qint64 n_transferValue;
+    qint64 n_transferTotal;
+    qint64 n_remoteFileSize;
 signals:
     void failToDataChannel();
     void loginSuccess();
@@ -64,6 +70,7 @@ signals:
     void transferFinished();
     void error(int code,QString desc);
     void remoteDirInfo(QStringList dirInfo);
+    void logout();
 
 public slots:
     void connectError(QAbstractSocket::SocketError code);
@@ -77,6 +84,7 @@ private slots:
     void readDataFinished();
     void transferData();
     void readDirInfo();
+    void clearDataSocket();
 };
 
 #endif // FTP_H

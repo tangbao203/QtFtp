@@ -4,9 +4,7 @@
 #include <QFile>
 #include <QHostAddress>
 #include <QFileInfo>
-#include <QDebug>
 #include <QThread>
-
 
 Ftp::Ftp():QObject(0),b_isConnected(false)
 {
@@ -50,6 +48,7 @@ Ftp::~Ftp()
 {
     delete p_cmdSocket;
     delete p_listener;
+    delete p_file;
 }
 
 void Ftp::setTransferProperty()
@@ -66,9 +65,12 @@ void Ftp::login(QString username,QString passwd)
     QString cmd="USER "+username+CHAR_CR+"PASS "+passwd+CHAR_CR;
 
     p_cmdSocket->write(cmd.toLatin1());
-    connect(p_cmdSocket,SIGNAL(readyRead()),this,SLOT(readCmdResult()));
 
+    //prepare receive all response data
+    connect(p_cmdSocket,SIGNAL(readyRead()),this,SLOT(readCmdResult()),Qt::UniqueConnection);
+    //set global transfer property
     setTransferProperty();
+    connect(p_listener,SIGNAL(newConnection()),this,SLOT(getPORTSocket()));
 }
 
 bool Ftp::connectToHost(QString ip,quint16 port)
@@ -76,13 +78,15 @@ bool Ftp::connectToHost(QString ip,quint16 port)
     p_cmdSocket->connectToHost(ip,port);
     connect(p_cmdSocket,SIGNAL(error(QAbstractSocket::SocketError)),this,SLOT(connectError(QAbstractSocket::SocketError)));
     connect(p_cmdSocket,SIGNAL(connected()),this,SLOT(connected()));
+
+    //block way run
     if(!p_cmdSocket->waitForConnected())
         b_isConnected=false;
 
     return b_isConnected;
 }
 
-void Ftp::buildDataChannel()
+void Ftp::addDataChannel()
 {
     QString cmd="";
     if(m_mode==Ftp::PORT){
@@ -100,7 +104,6 @@ void Ftp::buildDataChannel()
         address+=QChar(',')+QString::number((port&0xff00)>>8)+QChar(',')+QString::number(port&0xff);
         cmd="PORT "+address+CHAR_CR;
         p_cmdSocket->write(cmd.toLatin1());
-        connect(p_listener,SIGNAL(newConnection()),this,SLOT(getPORTSocket()));
     }
     else{
         cmd="PASV"+CHAR_CR;
@@ -111,11 +114,6 @@ void Ftp::buildDataChannel()
 
 void Ftp::getPORTSocket()
 {
-    if(p_dataSocket!=NULL){
-        p_dataSocket->close();
-        delete p_dataSocket;
-    }
-
     p_dataSocket=p_listener->nextPendingConnection();
     //start transfer data
     transferData();
@@ -123,7 +121,10 @@ void Ftp::getPORTSocket()
 
 void Ftp::put(QString local_filename,QString remote_filename,qint64 offset,bool is_append)
 {
-    buildDataChannel();
+    if(!b_isLogined || p_dataSocket!=NULL)
+        return;
+
+    addDataChannel();
 
     QFileInfo info(local_filename);
     if(!info.exists() || !info.isReadable()){
@@ -158,11 +159,14 @@ void Ftp::put(QString local_filename,QString remote_filename,qint64 offset,bool 
 
 void Ftp::get(QString local_filename,QString remote_filename,qint64 offset)
 {
-    quint64 remoteFileSize=fileSize(remote_filename);
+    if(!b_isLogined || p_dataSocket!=NULL)
+        return;
+
+    qint64 remoteFileSize=fileSize(remote_filename);
     if(remoteFileSize<=0)
         return;
 
-    buildDataChannel();
+    addDataChannel();
 
     if(p_file->isOpen())
         p_file->close();
@@ -188,7 +192,10 @@ void Ftp::get(QString local_filename,QString remote_filename,qint64 offset)
 
 void Ftp::list(QString remote_dir)
 {
-    buildDataChannel();
+    if(!b_isLogined || p_dataSocket!=NULL)
+        return;
+
+    addDataChannel();
 
     QString cmd="LIST "+remote_dir+CHAR_CR;
 
@@ -198,16 +205,16 @@ void Ftp::list(QString remote_dir)
 
 void Ftp::rawCommand(QString cmd)
 {
-    if(cmd.length()<=0)
+    if(!b_isLogined || cmd.length()<=0)
         return;
 
     m_cmdType=Ftp::CMD_OTHER;
     p_cmdSocket->write(cmd.toLatin1());
 }
 
-quint64 Ftp::fileSize(QString remote_filename)
+qint64 Ftp::fileSize(QString remote_filename)
 {
-    if(remote_filename.length()<=0)
+    if(!b_isLogined || remote_filename.length()<=0)
         return 0;
 
     n_remoteFileSize=0;
@@ -252,6 +259,7 @@ void Ftp::readCmdResult()
     QByteArray data;
 
     while((data=p_cmdSocket->readLine()).length()>0){
+        qDebug()<<data;
         QString result=QString(data);
         QRegExp regexp("^\\d{3}\.+");
 
@@ -270,22 +278,18 @@ void Ftp::readCmdResult()
                 b_isLogined=true;
                 break;
             case 227:{ //build pasv data channel
-                    QRegExp regexp("\((\\d{1,3}),(\\d{1,3}),(\\d{1,3}),(\\d{1,3}),(\\d{1,3}),(\\d{1,3})\)");
-                    QString ip,port;
+                    QRegExp regexp("\(?:(\\d{1,3}),(\\d{1,3}),(\\d{1,3}),(\\d{1,3}),(\\d{1,3}),(\\d{1,3})\)");
+                    QString ip;quint16 port;
                     if(regexp.indexIn(result)!=-1){
-                        ip=regexp.cap(1)+regexp.cap(2)+regexp.cap(3)+regexp.cap(4);
-                        port=regexp.cap(5)+regexp.cap(6);
+                        ip=regexp.cap(1)+"."+regexp.cap(2)+"."+regexp.cap(3)+"."+regexp.cap(4);
+                        port=(regexp.cap(5).toUInt()<<8)+regexp.cap(6).toUInt();
                     }
 
-                    if(p_dataSocket!=NULL){
-                        p_dataSocket->close();
-                        delete p_dataSocket;
-                        p_dataSocket=NULL;
-                    }
+                    //add new data connect,(old connect ignore)
                     p_dataSocket=new QTcpSocket;
-                    p_dataSocket->connectToHost(QHostAddress(ip),(quint16)port.toInt());
+                    p_dataSocket->connectToHost(QHostAddress(ip),port);
                     if(!p_dataSocket->waitForConnected()){
-                        emit error(11,"connect host fail at pasv!");
+                        emit failToDataChannel();
                         return;
                     }
 
@@ -295,10 +299,14 @@ void Ftp::readCmdResult()
                 break;
            case 213:{
                 bool toInt=false;
-                quint64 size=strlist.last().toLongLong(&toInt);
+                qint64 size=strlist.last().toLongLong(&toInt);
                 if(toInt && size>0)
                     n_remoteFileSize=size;
-                }
+                }break;
+            case 421://FTP timeout
+                b_isConnected=false;
+                b_isLogined=false;
+                emit logout();
                 break;
             default:
                 break;
@@ -331,10 +339,25 @@ void Ftp::transferData()
     default:
         break;
     }
+
+    //clear data socket connect
+    connect(p_dataSocket,SIGNAL(disconnected()),this,SLOT(clearDataSocket()));
+}
+
+void Ftp::clearDataSocket()
+{
+    if(p_dataSocket!=NULL){
+        p_dataSocket->close();
+        delete p_dataSocket;
+    }
+    p_dataSocket=NULL;
 }
 
 void Ftp::readDirInfo()
 {
+    if(m_cmdType!=Ftp::CMD_LIST)
+        return;
+
     QStringList dirInfo;
     while(p_dataSocket->bytesAvailable()>0){
         QString info=QString(p_dataSocket->readLine());
@@ -343,42 +366,32 @@ void Ftp::readDirInfo()
 
         dirInfo.append(info);
     }
-    emit remoteDirInfo(dirInfo);
 
-    disconnect(p_dataSocket,SIGNAL(readyRead()),this,SLOT(readDirInfo()));
+    emit remoteDirInfo(dirInfo);
+    clearDataSocket();
 }
 
 void Ftp::readDataFinished()
 {
     p_file->close();
-    p_dataSocket->close();
-    disconnect(p_dataSocket,SIGNAL(readyRead()),this,SLOT(readData()));
-    disconnect(p_dataSocket,SIGNAL(readChannelFinished()),this,SLOT(readDataFinished()));
-    delete p_dataSocket;
-    p_dataSocket=NULL;
+
+    clearDataSocket();
     emit transferFinished();
     return;
 }
 
 void Ftp::readData()
 {
+    if(m_cmdType!=Ftp::CMD_GET)
+        return;
 
     int bufsize=8*1024;//write size 8KB
-    char buffer[bufsize];
     p_dataSocket->setReadBufferSize(bufsize*16);//socket buffer size 128KB
 
     while(p_dataSocket->bytesAvailable()>0){
-        quint64 testee=p_dataSocket->bytesAvailable();
-        p_dataSocket->read(buffer,bufsize);
         QByteArray data=p_dataSocket->read(bufsize);
         if(b_stop){
-            p_file->close();
-            p_dataSocket->close();
-            disconnect(p_dataSocket,SIGNAL(readyRead()),this,SLOT(readData()));
-            disconnect(p_dataSocket,SIGNAL(readChannelFinished()),this,SLOT(readDataFinished()));
-            delete p_dataSocket;
-            p_dataSocket=NULL;
-            emit transferFinished();
+            readDataFinished();
             return;
         }
 
@@ -386,13 +399,10 @@ void Ftp::readData()
         if(bytesWrite==-1){
             emit error(12,"write to file fail!");
             p_file->close();
-            p_dataSocket->close();
-            disconnect(p_dataSocket,SIGNAL(readyRead()),this,SLOT(readData()));
-            disconnect(p_dataSocket,SIGNAL(readChannelFinished()),this,SLOT(readDataFinished()));
-            delete p_dataSocket;
-            p_dataSocket=NULL;
+            clearDataSocket();
             return;
         }
+
         n_transferValue+=bytesWrite;
         emit transferDataProgress(n_transferValue,n_transferTotal);
     }
@@ -405,30 +415,25 @@ void Ftp::writeData()
 
     int bufsize=8*1024;
     char buffer[bufsize];
-    quint64 read=p_file->read(buffer,bufsize);
+    qint64 read=p_file->read(buffer,bufsize);
     if(read==-1){
-        emit(11,"can't read file!");
+        emit error(11,"can't read file!");
         p_file->close();
-        p_dataSocket->close();
-        disconnect(p_dataSocket,SIGNAL(bytesWritten(qint64)),this,SLOT(writeData()));
-        delete p_dataSocket;
-        p_dataSocket=NULL;
+        clearDataSocket();
         return;
     }
 
     if(read==0 || b_stop){
-        emit transferFinished();
         p_file->close();
-        p_dataSocket->close();
-        disconnect(p_dataSocket,SIGNAL(bytesWritten(qint64)),this,SLOT(writeData()));
-        delete p_dataSocket;
-        p_dataSocket=NULL;
+        clearDataSocket();
+        emit transferFinished();
         return;
     }
 
     if(read>0){
-        quint64 bytesWrite=p_dataSocket->write(buffer,bufsize);
+        qint64 bytesWrite=p_dataSocket->write(buffer,bufsize);
         if(bytesWrite==0){
+            clearDataSocket();
             emit error(21,"write to server fail!");
             return;
         }
