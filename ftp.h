@@ -1,7 +1,6 @@
 #ifndef FTP_H
 #define FTP_H
 
-#include "ftp_global.h"
 #include <QObject>
 #include <QAbstractSocket>
 #include <QString>
@@ -21,11 +20,10 @@ public:
     enum CMD{CMD_PUT,CMD_GET,CMD_LIST,CMD_OTHER};
 
 public:
-    explicit Ftp();
+    explicit Ftp(QString ip,quint16 port);
     ~Ftp();
-    explicit Ftp(QString ip,quint16 port,QString username,QString passwd);
-    void login(QString username,QString passwd);
     bool connectToHost(QString ip,quint16 port);
+    void login(QString username,QString passwd);
     void mode(Mode transfer_mode){m_mode=transfer_mode;}
     void type(Type transfer_type){m_type=transfer_type;}
     void put(QString local_filename, QString remote_filename, qint64 offset=0, bool is_append=false);
@@ -63,7 +61,6 @@ private:
     qint64 n_transferTotal;
     qint64 n_remoteFileSize;
 signals:
-    void failToDataChannel();
     void loginSuccess();
     void execCmdResult(QString result);
     void transferDataProgress(qint64 transfer_size,qint64 total_size);
@@ -73,10 +70,10 @@ signals:
     void logout();
 
 public slots:
+    void login();
     void connectError(QAbstractSocket::SocketError code);
     void stopTransfer(){b_stop=true;}
 private slots:
-    void connected();
     void readCmdResult();
     void getPORTSocket();
     void writeData();
